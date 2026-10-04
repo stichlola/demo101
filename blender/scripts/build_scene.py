@@ -30,6 +30,8 @@ import bpy
 from mathutils import Euler, Matrix, Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import rig_models  # noqa: E402
 ROOT = os.path.dirname(HERE)
 
 # ------------------------------------------------------------------ config
@@ -74,6 +76,12 @@ def args_from_cli():
     ap.add_argument("--out", default=os.path.join(ROOT, "output", "rat_dance.blend"))
     ap.add_argument("--rat-bvh", default=os.path.join(ROOT, "mocap", "breakdance_long_85_12.bvh"))
     ap.add_argument("--roach-bvh", default=os.path.join(ROOT, "mocap", "salsa_60_08.bvh"))
+    ap.add_argument("--rat-model", default=os.path.join(ROOT, "models", "goblin.glb"),
+                    help="GLB to rig as the lead dancer ('' = primitive placeholder rat)")
+    ap.add_argument("--rat-kind", default="goblin", help="landmark set in rig_models.LANDMARKS")
+    ap.add_argument("--roach-model", default=os.path.join(ROOT, "models", "skeleton.glb"),
+                    help="GLB to rig as the backup dancers ('' = primitive placeholder roaches)")
+    ap.add_argument("--roach-kind", default="skeleton")
     ap.add_argument("--rows", type=int, default=3)
     ap.add_argument("--cols", type=int, default=7)
     ap.add_argument("--seed", type=int, default=7)
@@ -551,6 +559,8 @@ def dress_roach(arm, col):
 
 # ------------------------------------------------------------------ placement
 def skeleton_height(arm):
+    if "rest_height" in arm:
+        return arm["rest_height"]
     zs = [b.head_local.z for b in arm.data.bones] + [b.tail_local.z for b in arm.data.bones]
     return max(zs) - min(zs)
 
@@ -578,7 +588,38 @@ def facing_angle(arm, frame):
     return math.atan2(-1, 0) - math.atan2(fwd.y, fwd.x)
 
 
-def place_on_table(arm, action_range, height, mark, face_frame):
+def mesh_min_z(mesh, frames):
+    """Lowest evaluated vertex of a skinned mesh for each of `frames` (world z)."""
+    sc = bpy.context.scene
+    out = []
+    for f in frames:
+        sc.frame_set(f)
+        ev = mesh.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        mw = ev.matrix_world
+        out.append(min((mw @ v.co).z for v in ev.data.vertices))
+    return out
+
+
+def ground_contact(arm, mesh, action_range, col, floor_z, step=2):
+    """Per-frame vertical correction so a character with a different body volume
+    than the mocap actor neither sinks into nor floats above the table during
+    floor work, while real jumps stay airborne. Keys a parent empty's Z."""
+    frames = list(range(int(action_range[0]), int(action_range[1]) + 1, step))
+    lows = mesh_min_z(mesh, frames)
+    ref = sorted(lows)[len(lows) // 2]  # sole height while standing
+    want = [floor_z - min(m, ref) for m in lows]
+    root = bpy.data.objects.new(f"{arm.name}_root", None)
+    root.empty_display_size = 0.1
+    col.objects.link(root)
+    arm.parent = root
+    for i, (f, m) in enumerate(zip(frames, lows)):
+        win = want[max(0, i - 3):i + 4]
+        root.location.z = max(sum(win) / len(win), floor_z - m)
+        root.keyframe_insert("location", index=2, frame=f)
+    return root
+
+
+def place_on_table(arm, action_range, height, mark, face_frame, mesh=None):
     """Scale to `height`, ground the lowest point of the dance on the table and
     centre the average dance position on `mark`."""
     s = height / skeleton_height(arm)
@@ -586,7 +627,10 @@ def place_on_table(arm, action_range, height, mark, face_frame):
     frames = range(int(action_range[0]), int(action_range[1]) + 1, 3)
     pts = sample_motion(arm, frames)
     rot = Matrix.Rotation(ang, 3, "Z")
-    min_z = min(min(h.z, t.z) for _, _, h, t in pts)
+    if mesh is not None:
+        min_z = min(mesh_min_z(mesh, range(int(action_range[0]), int(action_range[1]) + 1, 5)))
+    else:
+        min_z = min(min(h.z, t.z) for _, _, h, t in pts)
     hips = [rot @ h for _, n, h, _ in pts if n == "Hips"]
     cx = sum(p.x for p in hips) / len(hips)
     cy = sum(p.y for p in hips) / len(hips)
@@ -711,29 +755,52 @@ def main():
     build_table(c_table)
     build_lights(c_lights)
 
-    # ---- rat: base skeleton from the breakdance mocap
-    rat, rat_action = import_bvh(args.rat_bvh, "RAT_rig")
-    link(rat, c_rat)
-    rat_extra_bones(rat)
-    dress_rat(rat, c_rat)
+    # ---- rat: breakdance mocap on the base skeleton (or the custom model)
+    rat_src, rat_action = import_bvh(args.rat_bvh, "RAT_rig")
     start, end = 1, int(rat_action.frame_range[1])
     sc.frame_start, sc.frame_end = start, end
-    place_on_table(rat, rat_action.frame_range, RAT_HEIGHT, RAT_MARK, face_frame=start)
-    for i in range(6):
-        wiggle(rat, f"Tail{i + 1}", 0, 0.25, 0.25, i * 0.6)
-        wiggle(rat, f"Tail{i + 1}", 2, 0.2, 0.17, i * 0.5)
-    for s, ph in (("L", 0.0), ("R", 1.3)):
-        wiggle(rat, f"Ear.{s}", 0, 0.15, 0.5, ph)
-    rat.data.display_type = "STICK"
-    rat.show_in_front = True
+    if args.rat_model:
+        rat, rat_mesh = rig_models.rig_character(args.rat_model, args.rat_kind, rat_src, "RAT_rig_model")
+        link(rat, c_rat)
+        link(rat_mesh, c_rat)
+        bpy.data.objects.remove(rat_src)
+        rat.name = rat.data.name = "RAT_rig"
+        rat_mesh.name = "RAT_mesh"
+        rat.animation_data_create().action = rat_action
+        place_on_table(rat, rat_action.frame_range, RAT_HEIGHT, RAT_MARK, face_frame=start, mesh=rat_mesh)
+        ground_contact(rat, rat_mesh, rat_action.frame_range, c_rat, TABLE_TOP)
+    else:
+        rat = rat_src
+        link(rat, c_rat)
+        rat_extra_bones(rat)
+        dress_rat(rat, c_rat)
+        place_on_table(rat, rat_action.frame_range, RAT_HEIGHT, RAT_MARK, face_frame=start)
+        for i in range(6):
+            wiggle(rat, f"Tail{i + 1}", 0, 0.25, 0.25, i * 0.6)
+            wiggle(rat, f"Tail{i + 1}", 2, 0.2, 0.17, i * 0.5)
+        for s, ph in (("L", 0.0), ("R", 1.3)):
+            wiggle(rat, f"Ear.{s}", 0, 0.15, 0.5, ph)
+        rat.data.display_type = "STICK"
 
-    # ---- cockroach template
-    tmpl, roach_action = import_bvh(args.roach_bvh, "ROACH_rig_template")
-    link(tmpl, c_roach)
-    roach_extra_bones(tmpl)
+    # ---- backup dancers template (cockroach placeholder or custom model)
+    tmpl_src, roach_action = import_bvh(args.roach_bvh, "ROACH_rig_template")
     tmpl_parts = collection("ROACH_template_parts", c_roach)
-    dress_roach(tmpl, tmpl_parts)
-    place_on_table(tmpl, roach_action.frame_range, ROACH_HEIGHT, Vector((0, 0, TABLE_TOP)), face_frame=1)
+    if args.roach_model:
+        tmpl, tmpl_mesh = rig_models.rig_character(args.roach_model, args.roach_kind, tmpl_src, "ROACH_rig_tmp")
+        bpy.data.objects.remove(tmpl_src)
+        tmpl.name = tmpl.data.name = "ROACH_rig_template"
+        tmpl_mesh.name = "ROACH_mesh_template"
+        link(tmpl, c_roach)
+        link(tmpl_mesh, tmpl_parts)
+        tmpl.animation_data_create().action = roach_action
+        place_on_table(tmpl, roach_action.frame_range, ROACH_HEIGHT, Vector((0, 0, TABLE_TOP)),
+                       face_frame=1, mesh=tmpl_mesh)
+    else:
+        tmpl = tmpl_src
+        link(tmpl, c_roach)
+        roach_extra_bones(tmpl)
+        dress_roach(tmpl, tmpl_parts)
+        place_on_table(tmpl, roach_action.frame_range, ROACH_HEIGHT, Vector((0, 0, TABLE_TOP)), face_frame=1)
     base_loc = tmpl.location.copy()
     base_rot = tmpl.rotation_euler.copy()
     tmpl.animation_data.action = None
@@ -764,15 +831,19 @@ def main():
             for d in list(arm.animation_data.drivers):
                 arm.animation_data.drivers.remove(d)
         nla_play(arm, roach_action, start, end, offset=row * ROACH_WAVE)
-        ph = random.uniform(0, 6.28)
-        for s in ("L", "R"):
-            wiggle(arm, f"Antenna1.{s}", 0, 0.25, 0.3, ph)
-            wiggle(arm, f"Antenna2.{s}", 2, 0.35, 0.22, ph + 1.0)
-            wiggle(arm, f"Wing.{s}", 1, 0.08, 0.6, ph)
+        if not args.roach_model:
+            ph = random.uniform(0, 6.28)
+            for s in ("L", "R"):
+                wiggle(arm, f"Antenna1.{s}", 0, 0.25, 0.3, ph)
+                wiggle(arm, f"Antenna2.{s}", 2, 0.35, 0.22, ph + 1.0)
+                wiggle(arm, f"Wing.{s}", 1, 0.08, 0.6, ph)
         pc = collection(f"ROACH_{idx:02d}_parts", c_roach)
         for p in tmpl_parts.objects:
-            o = p.copy()
+            o = p.copy()  # linked duplicate: mesh data stays shared
             o.parent = arm
+            for m in o.modifiers:
+                if m.type == "ARMATURE":
+                    m.object = arm
             pc.objects.link(o)
     # hide the template (kept as the source for custom models)
     tmpl_parts.hide_render = True
@@ -788,6 +859,7 @@ def main():
 
     # ---- render settings
     sc.render.engine = "BLENDER_EEVEE_NEXT"
+    sc.eevee.taa_render_samples = 32
     if hasattr(sc.eevee, "use_shadows"):
         sc.eevee.use_shadows = True
     sc.view_settings.view_transform = "AgX"
