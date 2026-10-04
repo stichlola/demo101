@@ -908,7 +908,7 @@ def main():
     sc.render.image_settings.file_format = "FFMPEG"
     sc.render.ffmpeg.format = "MPEG4"
     sc.render.ffmpeg.codec = "H264"
-    sc.render.filepath = os.path.join(ROOT, "output", "render", "rat_dance_")
+    sc.render.filepath = "//render/rat_dance_"  # relative to the .blend
     sc.frame_set(start)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
