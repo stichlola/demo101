@@ -32,6 +32,7 @@ from mathutils import Euler, Matrix, Vector
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import rig_models  # noqa: E402
+import volcano_set  # noqa: E402
 ROOT = os.path.dirname(HERE)
 
 # ------------------------------------------------------------------ config
@@ -42,7 +43,7 @@ TABLE_SIZE = (3.6, 1.9)       # x, y in metres
 TABLE_TOP = 0.95              # table surface height
 RAT_MARK = Vector((0.0, -0.25, TABLE_TOP))   # where the rat dances
 
-RAT_HEIGHT = 0.28             # standing height of the rat (metres)
+RAT_HEIGHT = 0.14             # standing height of the rat (metres)
 ROACH_HEIGHT = 0.30           # cockroaches are giant backup dancers
 ROACH_SPACING = (0.36, 0.30)  # x, y between dancers
 ROACH_FRONT_GAP = 0.40        # distance from rat mark to first roach row
@@ -69,6 +70,33 @@ CAMERA_KEYS = [
 ]
 
 
+# Volcano set: real human scale. Skeletons are 1.8 m, the goblin is about
+# half their height. Same choreography idea, wider aerial moves.
+VOLCANO = dict(
+    TABLE_TOP=volcano_set.ISLET_TOP,
+    RAT_MARK=Vector((0.0, -2.0, volcano_set.ISLET_TOP)),
+    RAT_HEIGHT=0.84,
+    ROACH_HEIGHT=1.8,
+    ROACH_SPACING=(2.1, 1.8),
+    ROACH_FRONT_GAP=2.6,
+    STAGE_RADIUS=volcano_set.ISLET_FLAT - 0.8,
+    CAMERA_KEYS=[
+        (1,    46.0, -30, 34, 20),   # wide: the islet alone in the lava lake
+        (100,  20.0, -15, 22, 24),   # swoop down over the lava
+        (190,  4.2,    0, 10, 35),   # land in front of the goblin
+        (300,  3.2,   80,  6, 35),   # low arc to the side, lava behind
+        (390,  8.0,  170, 14, 28),   # behind, through the skeleton army
+        (480,  3.8,  270, 16, 35),   # complete the orbit
+        (570,  7.0,  380, 80, 24),   # crane up: top-down spinning shot
+        (690,  5.5,  470, 78, 24),
+        (780,  2.6,  520,  5, 35),   # ground-level close-up, embers in front
+        (900,  3.2,  600, 10, 40),
+        (1000, 14.0, 690, 24, 24),   # rise again
+        (1125, 40.0, 740, 28, 20),   # final reveal of the crater
+    ],
+)
+STAGE_RADIUS = None  # kitchen: table bounds
+
 # ------------------------------------------------------------------ helpers
 def args_from_cli():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
@@ -82,6 +110,7 @@ def args_from_cli():
     ap.add_argument("--roach-model", default=os.path.join(ROOT, "models", "skeleton.glb"),
                     help="GLB to rig as the backup dancers ('' = primitive placeholder roaches)")
     ap.add_argument("--roach-kind", default="skeleton")
+    ap.add_argument("--set", choices=("volcano", "kitchen"), default="volcano")
     ap.add_argument("--rows", type=int, default=3)
     ap.add_argument("--cols", type=int, default=7)
     ap.add_argument("--seed", type=int, default=7)
@@ -737,6 +766,8 @@ def build_camera(col, rat, start, end):
 def main():
     args = args_from_cli()
     random.seed(args.seed)
+    if args.set == "volcano":
+        globals().update(VOLCANO)
     bpy.ops.wm.read_factory_settings(use_empty=True)
     sc = bpy.context.scene
     sc.name = "RatDance"
@@ -751,9 +782,10 @@ def main():
     c_roach = collection("CHAR_Roaches")
     c_cam = collection("CAMERA")
 
-    build_kitchen(c_set)
-    build_table(c_table)
-    build_lights(c_lights)
+    if args.set == "kitchen":
+        build_kitchen(c_set)
+        build_table(c_table)
+        build_lights(c_lights)
 
     # ---- rat: breakdance mocap on the base skeleton (or the custom model)
     rat_src, rat_action = import_bvh(args.rat_bvh, "RAT_rig")
@@ -815,7 +847,9 @@ def main():
             y = RAT_MARK.y + ROACH_FRONT_GAP + row * ROACH_SPACING[1]
             if abs(x) < ROACH_SPACING[0] * 0.6 and row == 0:
                 continue  # leave room behind the rat
-            if abs(x) > TABLE_SIZE[0] / 2 - 0.2:
+            if STAGE_RADIUS is None and abs(x) > TABLE_SIZE[0] / 2 - 0.2:
+                continue
+            if STAGE_RADIUS is not None and Vector((x, y)).length > STAGE_RADIUS:
                 continue
             dancers.append((row, colm, x, y))
 
@@ -855,11 +889,18 @@ def main():
     rat.animation_data.action = None
     nla_play(rat, rat_action, start, end)
 
-    build_camera(c_cam, rat, start, end)
+    cam = build_camera(c_cam, rat, start, end)
+    if args.set == "volcano":
+        volcano_set.build(c_set, c_lights, collection("FX"), start, end)
+        volcano_set.camera_shake(cam)
+        cam.data.clip_end = 600
+        cam.data.dof.aperture_fstop = 2.0
+        c_table.hide_render = c_table.hide_viewport = True
 
     # ---- render settings
     sc.render.engine = "BLENDER_EEVEE_NEXT"
-    sc.eevee.taa_render_samples = 32
+    if args.set == "kitchen":
+        sc.eevee.taa_render_samples = 32
     if hasattr(sc.eevee, "use_shadows"):
         sc.eevee.use_shadows = True
     sc.view_settings.view_transform = "AgX"
