@@ -1,0 +1,3 @@
+output/render/
+__pycache__/
+*.blend1
