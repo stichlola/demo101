@@ -1,2 +1,7 @@
 output/*.blend
 output/*.blend1
+output/pippo/*.stl
+output/pippo/*.zip
+output/pippo/*.blend
+output/pippo/*.blend1
+pippo/src/

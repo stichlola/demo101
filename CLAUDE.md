@@ -14,4 +14,6 @@
   in un vulcano, scheletri che ballano dietro). Vedi `blender/README.md`.
 - `print/`: oggetti per la stampa 3D. `print/scripts/emboss_text.py` aggiunge
   una scritta corsiva in rilievo sul cilindro `models/base.stl` (stampa in
-  vase mode); `models/tappo.stl` è il tappo. Vedi `print/README.md`.
+  vase mode); `models/tappo.stl` è il tappo. `print/scripts/pippo_rider.py`
+  sposta il mini personaggio dalla testa del golem "Pippo" alle sue spalle,
+  ricostruendo le gambe. Vedi `print/README.md`.
